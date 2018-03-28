@@ -15,7 +15,7 @@
 from Common.GlobalData import *
 from CommonDataClass.Exceptions import BadExpression
 from CommonDataClass.Exceptions import WrnExpression
-from Misc import GuidStringToGuidStructureString, ParseFieldValue
+from Misc import GuidStringToGuidStructureString, ParseFieldValue, IsFieldValueAnArray
 import Common.EdkLogger as EdkLogger
 import copy
 
@@ -40,20 +40,34 @@ ERR_ARRAY_ELE           = 'This must be HEX value for NList or Array: [%s].'
 ERR_EMPTY_EXPR          = 'Empty expression is not allowed.'
 ERR_IN_OPERAND          = 'Macro after IN operator can only be: $(FAMILY), $(ARCH), $(TOOL_CHAIN_TAG) and $(TARGET).'
 
+__ValidString = re.compile(r'[_a-zA-Z][_0-9a-zA-Z]*$')
+
 ## SplitString
 #  Split string to list according double quote
 #  For example: abc"de\"f"ghi"jkl"mn will be: ['abc', '"de\"f"', 'ghi', '"jkl"', 'mn']
 #
 def SplitString(String):
-    # There might be escaped quote: "abc\"def\\\"ghi"
-    Str = String.replace('\\\\', '//').replace('\\\"', '\\\'')
+    # There might be escaped quote: "abc\"def\\\"ghi", 'abc\'def\\\'ghi'
     RetList = []
-    InQuote = False
+    InSingleQuote = False
+    InDoubleQuote = False
     Item = ''
-    for i, ch in enumerate(Str):
-        if ch == '"':
-            InQuote = not InQuote
-            if not InQuote:
+    for i, ch in enumerate(String):
+        if ch == '"' and not InSingleQuote:
+            if String[i - 1] != '\\':
+                InDoubleQuote = not InDoubleQuote
+            if not InDoubleQuote:
+                Item += String[i]
+                RetList.append(Item)
+                Item = ''
+                continue
+            if Item:
+                RetList.append(Item)
+                Item = ''
+        elif ch == "'" and not InDoubleQuote:
+            if String[i - 1] != '\\':
+                InSingleQuote = not InSingleQuote
+            if not InSingleQuote:
                 Item += String[i]
                 RetList.append(Item)
                 Item = ''
@@ -62,7 +76,7 @@ def SplitString(String):
                 RetList.append(Item)
                 Item = ''
         Item += String[i]
-    if InQuote:
+    if InSingleQuote or InDoubleQuote:
         raise BadExpression(ERR_STRING_TOKEN % Item)
     if Item:
         RetList.append(Item)
@@ -71,27 +85,26 @@ def SplitString(String):
 def SplitPcdValueString(String):
     # There might be escaped comma in GUID() or DEVICE_PATH() or " "
     # or ' ' or L' ' or L" "
-    Str = String
     RetList = []
     InParenthesis = 0
     InSingleQuote = False
     InDoubleQuote = False
     Item = ''
-    for i, ch in enumerate(Str):
+    for i, ch in enumerate(String):
         if ch == '(':
             InParenthesis += 1
-        if ch == ')':
+        elif ch == ')':
             if InParenthesis:
                 InParenthesis -= 1
             else:
                 raise BadExpression(ERR_STRING_TOKEN % Item)
-        if ch == '"' and not InSingleQuote:
+        elif ch == '"' and not InSingleQuote:
             if String[i-1] != '\\':
                 InDoubleQuote = not InDoubleQuote
-        if ch == "'" and not InDoubleQuote:
+        elif ch == "'" and not InDoubleQuote:
             if String[i-1] != '\\':
                 InSingleQuote = not InSingleQuote
-        if ch == ',':
+        elif ch == ',':
             if InParenthesis or InSingleQuote or InDoubleQuote:
                 Item += String[i]
                 continue
@@ -105,6 +118,25 @@ def SplitPcdValueString(String):
     if Item:
         RetList.append(Item)
     return RetList
+
+def IsValidCName(Str):
+    return True if __ValidString.match(Str) else False
+
+def BuildOptionValue(PcdValue, GuidDict):
+    if PcdValue.startswith('H'):
+        InputValue = PcdValue[1:]
+    elif PcdValue.startswith("L'") or PcdValue.startswith("'"):
+        InputValue = PcdValue
+    elif PcdValue.startswith('L'):
+        InputValue = 'L"' + PcdValue[1:] + '"'
+    else:
+        InputValue = PcdValue
+    if IsFieldValueAnArray(InputValue):
+        try:
+            PcdValue = ValueExpressionEx(InputValue, 'VOID*', GuidDict)(True)
+        except:
+            pass
+    return PcdValue
 
 ## ReplaceExprMacro
 #
@@ -483,6 +515,8 @@ class ValueExpression(object):
             Flag = 0
             for Index in range(len(self._Token)):
                 if self._Token[Index] in ['"']:
+                    if self._Token[Index - 1] == '\\':
+                        continue
                     Flag += 1
             if Flag == 2 and self._Token.endswith('"'):
                 return True
@@ -490,6 +524,8 @@ class ValueExpression(object):
             Flag = 0
             for Index in range(len(self._Token)):
                 if self._Token[Index] in ["'"]:
+                    if self._Token[Index - 1] == '\\':
+                        continue
                     Flag += 1
             if Flag == 2 and self._Token.endswith("'"):
                 return True
@@ -537,16 +573,25 @@ class ValueExpression(object):
         self._Idx += 1
 
         # Replace escape \\\", \"
-        Expr = self._Expr[self._Idx:].replace('\\\\', '//').replace('\\\"', '\\\'')
-        for Ch in Expr:
-            self._Idx += 1
-            if Ch == '"' or Ch == "'":
-                break
-        self._Token = self._LiteralToken = self._Expr[Idx:self._Idx]
-        if self._Token.startswith('"') and not self._Token.endswith('"'):
-            raise BadExpression(ERR_STRING_TOKEN % self._Token)
-        if self._Token.startswith("'") and not self._Token.endswith("'"):
-            raise BadExpression(ERR_STRING_TOKEN % self._Token)
+        if self._Expr[Idx] == '"':
+            Expr = self._Expr[self._Idx:].replace('\\\\', '//').replace('\\\"', '\\\'')
+            for Ch in Expr:
+                self._Idx += 1
+                if Ch == '"':
+                    break
+            self._Token = self._LiteralToken = self._Expr[Idx:self._Idx]
+            if not self._Token.endswith('"'):
+                raise BadExpression(ERR_STRING_TOKEN % self._Token)
+        #Replace escape \\\', \'
+        elif self._Expr[Idx] == "'":
+            Expr = self._Expr[self._Idx:].replace('\\\\', '//').replace("\\\'", "\\\"")
+            for Ch in Expr:
+                self._Idx += 1
+                if Ch == "'":
+                    break
+            self._Token = self._LiteralToken = self._Expr[Idx:self._Idx]
+            if not self._Token.endswith("'"):
+                raise BadExpression(ERR_STRING_TOKEN % self._Token)
         self._Token = self._Token[1:-1]
         return self._Token
 
@@ -858,14 +903,15 @@ class ValueExpressionEx(ValueExpression):
                         LabelOffset = 0
                         for Index, Item in enumerate(PcdValueList):
                             # compute byte offset of every LABEL
+                            LabelList = ReLabel.findall(Item)
+                            Item = ReLabel.sub('', Item)
                             Item = Item.strip()
-                            try:
-                                LabelList = ReLabel.findall(Item)
+                            if LabelList:
                                 for Label in LabelList:
+                                    if not IsValidCName(Label):
+                                        raise BadExpression('%s is not a valid c variable name' % Label)
                                     if Label not in LabelDict.keys():
                                         LabelDict[Label] = str(LabelOffset)
-                            except:
-                                pass
                             if Item.startswith('UINT8'):
                                 LabelOffset = LabelOffset + 1
                             elif Item.startswith('UINT16'):

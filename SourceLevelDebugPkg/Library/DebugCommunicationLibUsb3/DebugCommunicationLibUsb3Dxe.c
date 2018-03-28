@@ -18,11 +18,15 @@
 #include <Library/HobLib.h>
 #include <Protocol/PciIo.h>
 #include <Protocol/IoMmu.h>
+#include <Protocol/DxeSmmReadyToLock.h>
 #include "DebugCommunicationLibUsb3Internal.h"
 
 GUID                        gUsb3DbgGuid =  USB3_DBG_GUID;
 
-USB3_DEBUG_PORT_HANDLE      *mUsb3Instance = NULL;
+USB3_DEBUG_PORT_HANDLE      mUsb3Instance = {USB3DBG_UNINITIALIZED};
+EFI_PHYSICAL_ADDRESS        mUsb3InstanceAddr = 0;
+EFI_PHYSICAL_ADDRESS        *mUsb3InstanceAddrPtr = NULL;
+EFI_PCI_IO_PROTOCOL         *mUsb3PciIo = NULL;
 
 /**
   Creates a named event that can be signaled.
@@ -85,20 +89,16 @@ Usb3NamedEventListen (
 /**
   USB3 map one DMA buffer.
 
-  @param Instance       Pointer to USB3 debug port instance.
   @param PciIo          Pointer to PciIo for USB3 debug port.
   @param Address        DMA buffer address to be mapped.
   @param NumberOfBytes  Number of bytes to be mapped.
-  @param BackupBuffer   Backup buffer address.
 
 **/
 VOID
 Usb3MapOneDmaBuffer (
-  IN USB3_DEBUG_PORT_HANDLE     *Instance,
   IN EFI_PCI_IO_PROTOCOL        *PciIo,
   IN EFI_PHYSICAL_ADDRESS       Address,
-  IN UINTN                      NumberOfBytes,
-  IN EFI_PHYSICAL_ADDRESS       BackupBuffer
+  IN UINTN                      NumberOfBytes
   )
 {
   EFI_STATUS                    Status;
@@ -117,23 +117,6 @@ Usb3MapOneDmaBuffer (
                     );
   ASSERT_EFI_ERROR (Status);
   ASSERT (DeviceAddress == ((EFI_PHYSICAL_ADDRESS) (UINTN) HostAddress));
-  if (Instance->FromHob) {
-    //
-    // Reallocate the DMA buffer by AllocateAddress with
-    // the memory type accessible by SMM.
-    //
-    CopyMem ((VOID *) (UINTN) BackupBuffer, (VOID *) (UINTN) Address, NumberOfBytes);
-    Status = gBS->FreePages (Address, EFI_SIZE_TO_PAGES (NumberOfBytes));
-    ASSERT_EFI_ERROR (Status);
-    Status = gBS->AllocatePages (
-                    AllocateAddress,
-                    EfiACPIMemoryNVS,
-                    EFI_SIZE_TO_PAGES (NumberOfBytes),
-                    &Address
-                    );
-    ASSERT_EFI_ERROR (Status);
-    CopyMem ((VOID *) (UINTN) Address, (VOID *) (UINTN) BackupBuffer, NumberOfBytes);
-  }
 }
 
 /**
@@ -149,114 +132,130 @@ Usb3MapDmaBuffers (
   IN EFI_PCI_IO_PROTOCOL        *PciIo
   )
 {
-  EFI_STATUS                    Status;
-  EDKII_IOMMU_PROTOCOL          *IoMmu;
-  EFI_PHYSICAL_ADDRESS          BackupBuffer;
-  UINTN                         BackupBufferSize;
-
-  IoMmu = NULL;
-  Status = gBS->LocateProtocol (&gEdkiiIoMmuProtocolGuid, NULL, (VOID **) &IoMmu);
-  if (EFI_ERROR (Status) || (IoMmu == NULL)) {
-    //
-    // No need to map the DMA buffers.
-    //
-    return;
-  }
-
-  //
-  // Allocate backup buffer for the case that the USB3
-  // debug port instance and DMA buffers are from PEI HOB.
-  // For this case, the DMA buffers need to be reallocated
-  // by AllocateAddress with the memory type accessible by
-  // SMM.
-  //
-  BackupBufferSize = MAX (XHCI_DEBUG_DEVICE_MAX_PACKET_SIZE * 2 + USB3_DEBUG_PORT_WRITE_MAX_PACKET_SIZE,
-                          MAX (sizeof (TRB_TEMPLATE) * TR_RING_TRB_NUMBER,
-                               MAX (sizeof (TRB_TEMPLATE) * EVENT_RING_TRB_NUMBER,
-                                    MAX (sizeof (EVENT_RING_SEG_TABLE_ENTRY) * ERST_NUMBER,
-                                         MAX (sizeof (XHC_DC_CONTEXT),
-                                              STRING0_DESC_LEN + MANU_DESC_LEN + PRODUCT_DESC_LEN + SERIAL_DESC_LEN)))));
-
-  Status = gBS->AllocatePages (
-                  AllocateAnyPages,
-                  EfiBootServicesData,
-                  EFI_SIZE_TO_PAGES (BackupBufferSize),
-                  &BackupBuffer
-                  );
-  ASSERT_EFI_ERROR (Status);
-
   Usb3MapOneDmaBuffer (
-    Instance,
     PciIo,
     Instance->UrbIn.Data,
-    XHCI_DEBUG_DEVICE_MAX_PACKET_SIZE * 2 + USB3_DEBUG_PORT_WRITE_MAX_PACKET_SIZE,
-    BackupBuffer
+    XHCI_DEBUG_DEVICE_MAX_PACKET_SIZE * 2 + USB3_DEBUG_PORT_WRITE_MAX_PACKET_SIZE
     );
 
   Usb3MapOneDmaBuffer (
-    Instance,
     PciIo,
     Instance->TransferRingIn.RingSeg0,
-    sizeof (TRB_TEMPLATE) * TR_RING_TRB_NUMBER,
-    BackupBuffer
+    sizeof (TRB_TEMPLATE) * TR_RING_TRB_NUMBER
     );
 
   Usb3MapOneDmaBuffer (
-    Instance,
     PciIo,
     Instance->TransferRingOut.RingSeg0,
-    sizeof (TRB_TEMPLATE) * TR_RING_TRB_NUMBER,
-    BackupBuffer
+    sizeof (TRB_TEMPLATE) * TR_RING_TRB_NUMBER
     );
 
   Usb3MapOneDmaBuffer (
-    Instance,
     PciIo,
     Instance->EventRing.EventRingSeg0,
-    sizeof (TRB_TEMPLATE) * EVENT_RING_TRB_NUMBER,
-    BackupBuffer
+    sizeof (TRB_TEMPLATE) * EVENT_RING_TRB_NUMBER
     );
 
   Usb3MapOneDmaBuffer (
-    Instance,
     PciIo,
     Instance->EventRing.ERSTBase,
-    sizeof (EVENT_RING_SEG_TABLE_ENTRY) * ERST_NUMBER,
-    BackupBuffer
+    sizeof (EVENT_RING_SEG_TABLE_ENTRY) * ERST_NUMBER
     );
 
   Usb3MapOneDmaBuffer (
-    Instance,
     PciIo,
     Instance->DebugCapabilityContext,
-    sizeof (XHC_DC_CONTEXT),
-    BackupBuffer
+    sizeof (XHC_DC_CONTEXT)
     );
 
   Usb3MapOneDmaBuffer (
-    Instance,
     PciIo,
     ((XHC_DC_CONTEXT *) (UINTN) Instance->DebugCapabilityContext)->DbcInfoContext.String0DescAddress,
-    STRING0_DESC_LEN + MANU_DESC_LEN + PRODUCT_DESC_LEN + SERIAL_DESC_LEN,
-    BackupBuffer
+    STRING0_DESC_LEN + MANU_DESC_LEN + PRODUCT_DESC_LEN + SERIAL_DESC_LEN
     );
-
-  gBS->FreePages (BackupBuffer, EFI_SIZE_TO_PAGES (BackupBufferSize));
 }
 
 /**
   Invoke a notification event
 
-  @param[in]  Event                 Event whose notification function is being invoked.
-  @param[in]  Context               The pointer to the notification function's context,
-                                    which is implementation-dependent.
+  @param[in] Event              Event whose notification function is being invoked.
+  @param[in] Context            The pointer to the notification function's context,
+                                which is implementation-dependent.
+
+**/
+VOID
+EFIAPI
+Usb3DxeSmmReadyToLockNotify (
+  IN EFI_EVENT                  Event,
+  IN VOID                       *Context
+  )
+{
+  USB3_DEBUG_PORT_HANDLE        *Instance;
+
+  DEBUG ((DEBUG_INFO, "%a()\n", __FUNCTION__));
+
+  Instance = GetUsb3DebugPortInstance ();
+  ASSERT (Instance != NULL);
+
+  Instance->InNotify = TRUE;
+
+  //
+  // For the case that the USB3 debug port instance and DMA buffers are
+  // from PEI HOB with IOMMU enabled.
+  // Reinitialize USB3 debug port with granted DXE DMA buffer accessible
+  // by SMM environment.
+  //
+  InitializeUsbDebugHardware (Instance);
+
+  //
+  // Wait some time for host to be ready after re-initialization.
+  //
+  MicroSecondDelay (1000000);
+
+  Instance->InNotify = FALSE;
+  gBS->CloseEvent (Event);
+}
+
+/**
+  USB3 get IOMMU protocol.
+
+  @return Pointer to IOMMU protocol.
+
+**/
+EDKII_IOMMU_PROTOCOL *
+Usb3GetIoMmu (
+  VOID
+  )
+{
+  EFI_STATUS                Status;
+  EDKII_IOMMU_PROTOCOL      *IoMmu;
+
+  IoMmu = NULL;
+  Status = gBS->LocateProtocol (
+             &gEdkiiIoMmuProtocolGuid,
+             NULL,
+             (VOID **) &IoMmu
+             );
+  if (!EFI_ERROR (Status) && (IoMmu != NULL)) {
+    return IoMmu;
+  }
+
+  return NULL;
+}
+
+/**
+  Invoke a notification event
+
+  @param[in] Event              Event whose notification function is being invoked.
+  @param[in] Context            The pointer to the notification function's context,
+                                which is implementation-dependent.
 
 **/
 VOID
 EFIAPI
 Usb3PciIoNotify (
-  IN  EFI_EVENT                Event,
-  IN  VOID                     *Context
+  IN  EFI_EVENT                 Event,
+  IN  VOID                      *Context
   )
 {
   EFI_STATUS                    Status;
@@ -269,8 +268,8 @@ Usb3PciIoNotify (
   UINTN                         PciDeviceNumber;
   UINTN                         PciFunctionNumber;
   UINT32                        PciAddress;
-
-  ASSERT (mUsb3Instance != NULL);
+  USB3_DEBUG_PORT_HANDLE        *Instance;
+  EFI_EVENT                     SmmReadyToLockEvent;
 
   Status = gBS->LocateHandleBuffer (
                   ByProtocol,
@@ -297,10 +296,26 @@ Usb3PciIoNotify (
         // Found the PciIo for USB3 debug port.
         //
         DEBUG ((DEBUG_INFO, "%a()\n", __FUNCTION__));
-        mUsb3Instance->InNotify = TRUE;
-        Usb3MapDmaBuffers (mUsb3Instance, PciIo);
-        mUsb3Instance->InNotify = FALSE;
-        gBS->CloseEvent ((EFI_EVENT) (UINTN) mUsb3Instance->PciIoEvent);
+        if (Usb3GetIoMmu () != NULL) {
+          Instance = GetUsb3DebugPortInstance ();
+          ASSERT (Instance != NULL);
+          if (Instance->Ready) {
+            Instance->InNotify = TRUE;
+            Usb3MapDmaBuffers (Instance, PciIo);
+            Instance->InNotify = FALSE;
+
+            if (Instance->FromHob) {
+              mUsb3PciIo = PciIo;
+              Usb3NamedEventListen (
+                &gEfiDxeSmmReadyToLockProtocolGuid,
+                TPL_NOTIFY,
+                Usb3DxeSmmReadyToLockNotify,
+                &SmmReadyToLockEvent
+                );
+            }
+          }
+        }
+        gBS->CloseEvent (Event);
         break;
       }
     }
@@ -310,34 +325,66 @@ Usb3PciIoNotify (
 }
 
 /**
-  Return USB3 debug instance address.
+  Return USB3 debug instance address pointer.
 
 **/  
-USB3_DEBUG_PORT_HANDLE *
-GetUsb3DebugPortInstance (
+EFI_PHYSICAL_ADDRESS *
+GetUsb3DebugPortInstanceAddrPtr (
   VOID
   )
 {
-  USB3_DEBUG_PORT_HANDLE          *Instance;
-  EFI_PEI_HOB_POINTERS            Hob;
-
-  Instance = NULL;
-
-  if (mUsb3Instance != NULL) {
-    Instance = mUsb3Instance;
-    goto Done;
+  if (mUsb3InstanceAddrPtr == NULL) {
+    //
+    // Use the local variables temporarily.
+    //
+    mUsb3InstanceAddr = (EFI_PHYSICAL_ADDRESS) (UINTN) &mUsb3Instance;
+    mUsb3InstanceAddrPtr = &mUsb3InstanceAddr;
   }
+  return mUsb3InstanceAddrPtr;
+}
 
-  Hob.Raw = GetFirstGuidHob (&gUsb3DbgGuid);
-  if (Hob.Raw != NULL) {
-    Instance = GET_GUID_HOB_DATA (Hob.Guid);
-  }
+/**
+  Allocates pages that are suitable for an OperationBusMasterCommonBuffer or
+  OperationBusMasterCommonBuffer64 mapping.
 
-Done:
-  if (Instance != NULL) {
-    DiscoverInitializeUsbDebugPort (Instance);
+  @param PciIo                  Pointer to PciIo for USB3 debug port.
+  @param Pages                  The number of pages to allocate.
+  @param Address                A pointer to store the base system memory address of the
+                                allocated range.
+
+  @retval EFI_SUCCESS           The requested memory pages were allocated.
+  @retval EFI_UNSUPPORTED       Attributes is unsupported. The only legal attribute bits are
+                                MEMORY_WRITE_COMBINE and MEMORY_CACHED.
+  @retval EFI_INVALID_PARAMETER One or more parameters are invalid.
+  @retval EFI_OUT_OF_RESOURCES  The memory pages could not be allocated.
+
+**/
+EFI_STATUS
+Usb3AllocateDmaBuffer (
+  IN EFI_PCI_IO_PROTOCOL    *PciIo,
+  IN UINTN                  Pages,
+  OUT VOID                  **Address
+  )
+{
+  EFI_STATUS            Status;
+
+  *Address = NULL;
+  Status = PciIo->AllocateBuffer (
+                    PciIo,
+                    AllocateAnyPages,
+                    EfiRuntimeServicesData,
+                    Pages,
+                    Address,
+                    0
+                    );
+  if (!EFI_ERROR (Status)) {
+    Usb3MapOneDmaBuffer (
+      PciIo,
+      (EFI_PHYSICAL_ADDRESS) (UINTN) *Address,
+      EFI_PAGES_TO_SIZE (Pages)
+      );
   }
-  return Instance;
+  return Status;
 }
 
 /**
@@ -360,15 +407,23 @@ AllocateAlignBuffer (
   Buf = NULL;
   
   if (gBS != NULL) {
-    TmpAddr = 0xFFFFFFFF;
-    Status = gBS->AllocatePages (
-               AllocateMaxAddress,
-               EfiACPIMemoryNVS,
-               EFI_SIZE_TO_PAGES (BufferSize),
-               &TmpAddr
-               );
-    if (!EFI_ERROR (Status)) {
-      Buf = (VOID *) (UINTN) TmpAddr;
+    if (mUsb3PciIo != NULL) {
+      Usb3AllocateDmaBuffer (
+        mUsb3PciIo,
+        EFI_SIZE_TO_PAGES (BufferSize),
+        &Buf
+        );
+    } else {
+      TmpAddr = 0xFFFFFFFF;
+      Status = gBS->AllocatePages (
+                      AllocateMaxAddress,
+                      EfiACPIMemoryNVS,
+                      EFI_SIZE_TO_PAGES (BufferSize),
+                      &TmpAddr
+                      );
+      if (!EFI_ERROR (Status)) {
+        Buf = (VOID *) (UINTN) TmpAddr;
+      }
     }
   }
 
@@ -391,59 +446,50 @@ DebugCommunicationUsb3DxeConstructor (
   IN EFI_SYSTEM_TABLE  *SystemTable
   )
 {
-  USB3_DEBUG_PORT_HANDLE        UsbDbg;
+  EFI_PHYSICAL_ADDRESS          *AddrPtr;
   USB3_DEBUG_PORT_HANDLE        *Instance;
   EFI_PHYSICAL_ADDRESS          Address;
   EFI_STATUS                    Status;
   EFI_EVENT                     Event;
 
+  Status = EfiGetSystemConfigurationTable (&gUsb3DbgGuid, (VOID **) &AddrPtr);
+  if (EFI_ERROR (Status)) {
+    //
+    // Instead of using local variables, install system configuration table for
+    // the local instance and the buffer to save instance address pointer.
+    //
+    Address = SIZE_4GB;
+    Status = gBS->AllocatePages (
+                    AllocateMaxAddress,
+                    EfiACPIMemoryNVS,
+                    EFI_SIZE_TO_PAGES (sizeof (EFI_PHYSICAL_ADDRESS) + sizeof (USB3_DEBUG_PORT_HANDLE)),
+                    &Address
+                    );
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+
+    AddrPtr = (EFI_PHYSICAL_ADDRESS *) (UINTN) Address;
+    ZeroMem (AddrPtr, sizeof (EFI_PHYSICAL_ADDRESS) + sizeof (USB3_DEBUG_PORT_HANDLE));
+    Instance = (USB3_DEBUG_PORT_HANDLE *) (AddrPtr + 1);
+    CopyMem (Instance, &mUsb3Instance, sizeof (USB3_DEBUG_PORT_HANDLE));
+    *AddrPtr = (EFI_PHYSICAL_ADDRESS) (UINTN) Instance;
+
+    Status = gBS->InstallConfigurationTable (&gUsb3DbgGuid, AddrPtr);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+  }
+
+  if (mUsb3InstanceAddrPtr != NULL) {
+    *AddrPtr = *mUsb3InstanceAddrPtr;
+  }
+  mUsb3InstanceAddrPtr = AddrPtr;
+
   Instance = GetUsb3DebugPortInstance ();
+  ASSERT (Instance != NULL);
 
-  Status = EfiGetSystemConfigurationTable (&gUsb3DbgGuid, (VOID **) &mUsb3Instance);
-  if (!EFI_ERROR (Status)) {
-    goto Done;
-  }
-
-  if (Instance == NULL) {
-    //
-    // Initialize USB debug
-    //
-    ZeroMem (&UsbDbg, sizeof (UsbDbg));
-    UsbDbg.Initialized = USB3DBG_UNINITIALIZED;
-
-    DiscoverInitializeUsbDebugPort (&UsbDbg);
-
-    Instance = &UsbDbg;
-  }
-
-  //
-  // It is first time to run DXE instance, copy Instance from Hob to ACPINvs.
-  //
-  Address = SIZE_4GB;
-  Status = gBS->AllocatePages (
-                  AllocateMaxAddress,
-                  EfiACPIMemoryNVS,
-                  EFI_SIZE_TO_PAGES (sizeof (USB3_DEBUG_PORT_HANDLE)),
-                  &Address
-                  );
-  if (EFI_ERROR (Status)) {
-    return Status;
-  }
-
-  CopyMem (
-    (VOID *)(UINTN)Address,
-    Instance,
-    sizeof (USB3_DEBUG_PORT_HANDLE)
-    );
-  mUsb3Instance = (USB3_DEBUG_PORT_HANDLE *)(UINTN)Address;
-
-  Status = gBS->InstallConfigurationTable (&gUsb3DbgGuid, mUsb3Instance);
-  if (EFI_ERROR (Status)) {
-    return Status;
-  }
-
-Done:
-  if ((mUsb3Instance != NULL) && mUsb3Instance->Ready && (mUsb3Instance->PciIoEvent == 0)) {
+  if (Instance->PciIoEvent == 0) {
     Status = Usb3NamedEventListen (
                &gEfiPciIoProtocolGuid,
                TPL_NOTIFY,
@@ -451,7 +497,7 @@ Done:
                &Event
                );
     if (!EFI_ERROR (Status)) {
-      mUsb3Instance->PciIoEvent = (EFI_PHYSICAL_ADDRESS) (UINTN) Event;
+      Instance->PciIoEvent = (EFI_PHYSICAL_ADDRESS) (UINTN) Event;
     }
   }
 
@@ -474,12 +520,17 @@ DebugCommunicationUsb3DxeDestructor (
   IN EFI_SYSTEM_TABLE  *SystemTable
   )
 {
-  if ((mUsb3Instance != NULL) && (mUsb3Instance->PciIoEvent != 0)) {
+  USB3_DEBUG_PORT_HANDLE        *Instance;
+
+  Instance = GetUsb3DebugPortInstance ();
+  ASSERT (Instance != NULL);
+
+  if (Instance->PciIoEvent != 0) {
     //
     // Close the event created.
     //
-    gBS->CloseEvent ((EFI_EVENT) (UINTN) mUsb3Instance->PciIoEvent);
-    mUsb3Instance->PciIoEvent = 0;
+    gBS->CloseEvent ((EFI_EVENT) (UINTN) Instance->PciIoEvent);
+    Instance->PciIoEvent = 0;
   }
   return EFI_SUCCESS;
 }

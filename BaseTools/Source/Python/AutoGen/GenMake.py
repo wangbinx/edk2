@@ -1551,20 +1551,15 @@ class TopLevelMakefile(BuildFile):
         if GlobalData.gIgnoreSource:
             ExtraOption += " --ignore-sources"
 
-        if GlobalData.BuildOptionPcd:
-            for index, option in enumerate(GlobalData.gCommand):
-                if "--pcd" == option and GlobalData.gCommand[index+1]:
-                    pcdName, pcdValue = GlobalData.gCommand[index+1].split('=')
-                    if pcdValue.startswith('H'):
-                        pcdValue = 'H' + '"' + pcdValue[1:] + '"'
-                        ExtraOption += " --pcd " + pcdName + '=' + pcdValue
-                    elif pcdValue.startswith("L'"):
-                        ExtraOption += "--pcd " + pcdName + '=' + pcdValue
-                    elif pcdValue.startswith('L'):
-                        pcdValue = 'L' + '"' + pcdValue[1:] + '"'
-                        ExtraOption += " --pcd " + pcdName + '=' + pcdValue
-                    else:
-                        ExtraOption += " --pcd " + GlobalData.gCommand[index+1]
+        for pcd in GlobalData.BuildOptionPcd:
+            if pcd[2]:
+                pcdname = '.'.join(pcd[0:3])
+            else:
+                pcdname = '.'.join(pcd[0:2])
+            if pcd[3].startswith('{'):
+                ExtraOption += " --pcd " + pcdname + '=' + 'H' + '"' + pcd[3] + '"'
+            else:
+                ExtraOption += " --pcd " + pcdname + '=' + pcd[3]
 
         MakefileName = self._FILE_NAME_[self._FileType]
         SubBuildCommandList = []

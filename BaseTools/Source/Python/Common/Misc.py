@@ -1441,23 +1441,44 @@ def ParseConsoleLog(Filename):
     Opr.close()
     Opw.close()
 
+def IsFieldValueAnArray (Value):
+    Value = Value.strip()
+    if Value.startswith('GUID') and Value.endswith(')'):
+        return True
+    if Value.startswith('L"') and Value.endswith('"')  and len(list(Value[2:-1])) > 1:
+        return True
+    if Value[0] == '"' and Value[-1] == '"' and len(list(Value[1:-1])) > 1:
+        return True
+    if Value[0] == '{' and Value[-1] == '}':
+        return True
+    if Value.startswith("L'") and Value.endswith("'") and len(list(Value[2:-1])) > 1:
+        return True
+    if Value[0] == "'" and Value[-1] == "'" and len(list(Value[1:-1])) > 1:
+        return True
+    return False
+
 def AnalyzePcdExpression(Setting):
     Setting = Setting.strip()
-    # There might be escaped quote in a string: \", \\\"
-    Data = Setting.replace('\\\\', '//').replace('\\\"', '\\\'')
+    # There might be escaped quote in a string: \", \\\" , \', \\\'
+    Data = Setting
     # There might be '|' in string and in ( ... | ... ), replace it with '-'
     NewStr = ''
-    InStr = False
+    InSingleQuoteStr = False
+    InDoubleQuoteStr = False
     Pair = 0
-    for ch in Data:
-        if ch == '"':
-            InStr = not InStr
-        elif ch == '(' and not InStr:
+    for Index, ch in enumerate(Data):
+        if ch == '"' and not InSingleQuoteStr:
+            if Data[Index - 1] != '\\':
+                InDoubleQuoteStr = not InDoubleQuoteStr
+        elif ch == "'" and not InDoubleQuoteStr:
+            if Data[Index - 1] != '\\':
+                InSingleQuoteStr = not InSingleQuoteStr
+        elif ch == '(' and not (InSingleQuoteStr or InDoubleQuoteStr):
             Pair += 1
-        elif ch == ')' and not InStr:
+        elif ch == ')' and not (InSingleQuoteStr or InDoubleQuoteStr):
             Pair -= 1
 
-        if (Pair > 0 or InStr) and ch == TAB_VALUE_SPLIT:
+        if (Pair > 0 or InSingleQuoteStr or InDoubleQuoteStr) and ch == TAB_VALUE_SPLIT:
             NewStr += '-'
         else:
             NewStr += ch
@@ -1549,7 +1570,13 @@ def ParseFieldValue (Value):
         return Value, 16
     if Value.startswith('L"') and Value.endswith('"'):
         # Unicode String
-        List = list(Value[2:-1])
+        # translate escape character
+        Value = Value[1:]
+        try:
+            Value = eval(Value)
+        except:
+            Value = Value[1:-1]
+        List = list(Value)
         List.reverse()
         Value = 0
         for Char in List:
@@ -1557,7 +1584,12 @@ def ParseFieldValue (Value):
         return Value, (len(List) + 1) * 2
     if Value.startswith('"') and Value.endswith('"'):
         # ASCII String
-        List = list(Value[1:-1])
+        # translate escape character
+        try:
+            Value = eval(Value)
+        except:
+            Value = Value[1:-1]
+        List = list(Value)
         List.reverse()
         Value = 0
         for Char in List:
@@ -1565,7 +1597,13 @@ def ParseFieldValue (Value):
         return Value, len(List) + 1
     if Value.startswith("L'") and Value.endswith("'"):
         # Unicode Character Constant
-        List = list(Value[2:-1])
+        # translate escape character
+        Value = Value[1:]
+        try:
+            Value = eval(Value)
+        except:
+            Value = Value[1:-1]
+        List = list(Value)
         if len(List) == 0:
             raise BadExpression('Length %s is %s' % (Value, len(List)))
         List.reverse()
@@ -1575,7 +1613,12 @@ def ParseFieldValue (Value):
         return Value, len(List) * 2
     if Value.startswith("'") and Value.endswith("'"):
         # Character constant
-        List = list(Value[1:-1])
+        # translate escape character
+        try:
+            Value = eval(Value)
+        except:
+            Value = Value[1:-1]
+        List = list(Value)
         if len(List) == 0:
             raise BadExpression('Length %s is %s' % (Value, len(List)))
         List.reverse()
@@ -1677,14 +1720,6 @@ def AnalyzeDscPcd(Setting, PcdType, DataType=''):
             Type = DataType
         if len(FieldList) > 2:
             Size = FieldList[2]
-        else:
-            if Type == 'VOID*':
-                if Value.startswith("L"):
-                    Size = str((len(Value)- 3 + 1) * 2)
-                elif Value.startswith("{"):
-                    Size = str(len(Value.split(",")))
-                else:
-                    Size = str(len(Value) -2 + 1 )
         if DataType == "":
             IsValid = (len(FieldList) <= 1)
         else:
@@ -2350,31 +2385,6 @@ def PackRegistryFormatGuid(Guid):
                 int(Guid[4][-2:], 16)
                 )
 
-def BuildOptionPcdValueFormat(TokenSpaceGuidCName, TokenCName, PcdDatumType, Value):
-    if PcdDatumType not in [TAB_UINT8, TAB_UINT16, TAB_UINT32, TAB_UINT64,'BOOLEAN']:
-        if Value.startswith('L') or Value.startswith('"'):
-            if not Value[1]:
-                EdkLogger.error("build", FORMAT_INVALID, 'For Void* type PCD, when specify the Value in the command line, please use the following format: "string", L"string", H"{...}"')
-            Value = Value
-        elif Value.startswith('H'):
-            if not Value[1]:
-                EdkLogger.error("build", FORMAT_INVALID, 'For Void* type PCD, when specify the Value in the command line, please use the following format: "string", L"string", H"{...}"')
-            Value = Value[1:]
-        else:
-            if not Value[0]:
-                EdkLogger.error("build", FORMAT_INVALID, 'For Void* type PCD, when specify the Value in the command line, please use the following format: "string", L"string", H"{...}"')
-            Value = '"' + Value + '"'
-
-    IsValid, Cause = CheckPcdDatum(PcdDatumType, Value)
-    if not IsValid:
-        EdkLogger.error("build", FORMAT_INVALID, Cause, ExtraData="%s.%s" % (TokenSpaceGuidCName, TokenCName))
-    if PcdDatumType == 'BOOLEAN':
-        Value = Value.upper()
-        if Value == 'TRUE' or Value == '1':
-            Value = '1'
-        elif Value == 'FALSE' or Value == '0':
-            Value = '0'
-    return  Value
 ##  Get the integer value from string like "14U" or integer like 2
 #
 #   @param      Input   The object that may be either a integer value or a string

@@ -472,11 +472,6 @@ typedef struct _USB3_DEBUG_PORT_INSTANCE {
   BOOLEAN                                 FromHob;
 
   //
-  // IOMMU PPI Notify registered
-  //
-  BOOLEAN                                 PpiNotifyRegistered;
-
-  //
   // Prevent notification being interrupted by debug timer
   //
   BOOLEAN                                 InNotify;
@@ -561,7 +556,7 @@ typedef struct _USB3_DEBUG_PORT_INSTANCE {
 UINT32
 XhcReadDebugReg (
   IN  USB3_DEBUG_PORT_HANDLE    *Handle,
-  IN  UINT32                      Offset
+  IN  UINT32                    Offset
   );
 
 /**
@@ -575,8 +570,8 @@ XhcReadDebugReg (
 VOID
 XhcSetDebugRegBit (
   IN USB3_DEBUG_PORT_HANDLE  *Handle,
-  IN UINT32                   Offset,
-  IN UINT32                   Bit
+  IN UINT32                  Offset,
+  IN UINT32                  Bit
   );
   
 /**
@@ -592,43 +587,6 @@ XhcWriteDebugReg (
   IN USB3_DEBUG_PORT_HANDLE     *Handle,
   IN UINT32                     Offset,
   IN UINT32                     Data
-  );
-
-/**
-  Discover the USB3 debug device.
-  
-  @param  Handle                Debug port handle.
-  
-  @retval RETURN_SUCCESS        The serial device was initialized.
-  @retval RETURN_DEVICE_ERROR   The serial device could not be initialized.
-
-**/
-RETURN_STATUS
-DiscoverUsb3DebugPort(
-  USB3_DEBUG_PORT_HANDLE  *Handle
-  );
-  
-/**
-  Initialize the Serial Device hardware.
-  
-  @param  Handle            Debug port handle.
-
-  @retval RETURN_SUCCESS    The serial device was initialized successfully.
-  @retval !RETURN_SUCCESS   Error.
-
-**/
-RETURN_STATUS
-InitializeUsb3DebugPort (
-  USB3_DEBUG_PORT_HANDLE  *Handle
-  );
-
-/**
-  Return XHCI MMIO base address.
-
-**/
-EFI_PHYSICAL_ADDRESS
-GetXhciBaseAddress (
-  VOID
   );
 
 /**
@@ -765,14 +723,12 @@ InitializeUsbDebugHardware (
   );
 
 /**
-  Discover and initialize usb debug port.
+  Return USB3 debug instance address pointer.
 
-  @param Handle                  Debug port handle.
-
-**/
-VOID
-DiscoverInitializeUsbDebugPort (
-  IN USB3_DEBUG_PORT_HANDLE     *Handle
+**/  
+EFI_PHYSICAL_ADDRESS *
+GetUsb3DebugPortInstanceAddrPtr (
+  VOID
   );
 
 /**
